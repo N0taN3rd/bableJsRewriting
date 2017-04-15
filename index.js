@@ -8,20 +8,13 @@ const generate = require('babel-generator')
 const template = require('babel-template')
 const numToWord = require('number-to-words')
 
+const runPromise = require('./lib/runPromise')
+const MemExTests = require('./lib/memExTests')
+const MemExprExtractors = require('./lib/memExprExtractors')
+
 ///home/john/WebstormProjects/bableJsRewrite/mendy/Helen Palmer - Mendeley_files/index.js
 const here = process.cwd()
 const mendyIndex = Path.join(here, 'mendy', 'js', 'index.js')
-
-function thenNoop () {}
-function defaultCatcher (err) {console.error(err)}
-
-function runPromise (runnable, thener = thenNoop, catcher = defaultCatcher) {
-  if (typeof runnable.then === 'function') {
-    runnable.then(thener).catch(catcher)
-  } else {
-    runnable().then(thener).catch(catcher)
-  }
-}
 
 function readJsFile (file) {
   return fs.readFileAsync(file, 'utf8')
@@ -30,44 +23,10 @@ function readJsFile (file) {
 const winLocIsMemCache = new Map()
 const winLocIsMemTestCache = new Map()
 
-function isPropLoc ({property}) {
-  return bTypes.isIdentifier(property, {name: 'location'})
-}
-
-function isWindowMemberExpr (node) {
-  const t1 = bTypes.isIdentifier(node.object, {name: 'window'})
-  if (t1) {return t1}
-  let {object} = node.object
-  return bTypes.isIdentifier(object, {name: 'window'})
-}
-
-function isWindowDotLocation (node) {
-  return bTypes.isIdentifier(node.property, {name: 'location'}) ||
-    bTypes.isIdentifier(node.object.property, {name: 'location'})
-}
-
-function isWindowPostMessage (node) {
-  return bTypes.isIdentifier(node.property, {name: 'postMessage'})
-}
-
-function isWindowAMember (node) {
-  const t1 = bTypes.isIdentifier(node.property, {name: 'window'})
-  if (t1) {return t1}
-  let it = node.object
-  let t2
-  while (it) {
-    t2 = bTypes.isIdentifier(it.property, {name: 'window'})
-    if (t2) {return t2}
-    it = it.object
-  }
-  return false
-}
-
-
 function makeWindowLocReplacer (_with) {
   const winlocPropReplacer = template(`${_with}.what`)
   return {
-    justSubWindowLoc: template(`${_with}`),
+    justSubWindowLoc: template(`${_with}`)(),
     windowLocReplace (what) {
       return winlocPropReplacer({what})
     }
@@ -169,68 +128,6 @@ function makeWindowLocOnSomeObjReplaceWTest (_with) {
   }
 }
 
-function extractWindowMemberLocation (node) {
-  let it = node.object
-  let doRhs = false
-  const isLocationTerminal = bTypes.isIdentifier(node.property, {name: 'location'})
-  const LHS = []
-  const RHS = []
-  while (it) {
-    if (bTypes.isThisExpression(it)) {
-      LHS.unshift('this')
-    } else if (isPropLoc(it)) {
-      if (isLocationTerminal) {
-        break
-      }
-    } else if (doRhs) {
-      RHS.unshift(it.property.name)
-    } else {
-      LHS.unshift(it.property.name)
-    }
-    it = it.object
-  }
-  if (!isLocationTerminal) {
-    RHS.push(node.property.name)
-    return {LHS, RHS}
-  } else {
-    return {LHS}
-  }
-}
-
-function simpleExtractLocOnObject (node) {
-  let it = node.object
-  const isLocationTerminal = bTypes.isIdentifier(node.property, {name: 'location'})
-  const LHS = []
-  const RHS = []
-  while (it) {
-    if (isPropLoc(it)) {
-      if (isLocationTerminal) {
-        break
-      }
-    } else {
-      if (it.name) {
-        LHS.unshift(it.name)
-      } else if (it.property) {
-        LHS.unshift(it.property.name)
-      }
-    }
-    it = it.object
-  }
-  if (!isLocationTerminal) {
-    RHS.push(node.property.name)
-    return {LHS, RHS}
-  } else {
-    return {LHS}
-  }
-}
-
-function isPortTwo (node) {
-  if (node.property) {
-    return bTypes.isIdentifier(node.property, {name: 'port2'})
-  }
-  return false
-}
-
 //window. 12
 
 const {justSubWindowLoc, windowLocReplace} = makeWindowLocReplacer('window.WB_wombat_location')
@@ -242,11 +139,19 @@ const locIsOnSomeObjectReplacer = makeWindowLocOnSomeObjReplaceWTest('WB_wombat_
 
 const locOnObject = ({object}) => object && object.property ? bTypes.isIdentifier(object.property, {name: 'location'}) : false
 
+function notNull (it) {
+  return !(it === null || it === undefined)
+}
+
 const visited = new Set()
 
 const testTempl = {
   theTest: template(`function ID (T,G,GG,RE) {if (Object.is(T,G)){return GG;} else {return RE;}}`),
   callTest: template('var TID = ID(T,G,GG,RE);'),
+  _callTest2: template('ID(T,G,GG,RE)'),
+  callTest2 (T, G, GG, RE) {
+    return this._callTest2({T, G, GG, RE})
+  },
   lastId: null
 }
 
@@ -257,67 +162,105 @@ function insertTestCall (name, path, T, G, GG, RE) {
   parentBlock.unshiftContainer('body', newNode)
   path.replaceWith(TID)
 }
-
-async function doIt () {
-  const indexJs = await readJsFile(mendyIndex)
-  const ast = parse(indexJs)
-  console.time('travers')
-  traverse.default(ast, {
-      Program (path) {
-        testTempl.lastId = path.scope.generateUidIdentifier('objectTest')
-        path.unshiftContainer('body', testTempl.theTest({
-          ID: testTempl.lastId,
-          T: path.scope.generateUidIdentifier('T'),
-          G: path.scope.generateUidIdentifier('G'),
-          GG: path.scope.generateUidIdentifier('GG'),
-          RE: path.scope.generateUidIdentifier('RE'),
-        }))
-      },
-      MemberExpression(path) {
-        if (visited.has(path.node.loc)) {
+const originalRW = {
+  Program (path) {
+    testTempl.lastId = path.scope.generateUidIdentifier('objectTest')
+    path.unshiftContainer('body', testTempl.theTest({
+      ID: testTempl.lastId,
+      T: path.scope.generateUidIdentifier('T'),
+      G: path.scope.generateUidIdentifier('G'),
+      GG: path.scope.generateUidIdentifier('GG'),
+      RE: path.scope.generateUidIdentifier('RE'),
+    }))
+  },
+  MemberExpression(path) {
+    if (visited.has(path.node.loc)) {
+      return
+    }
+    if (MemExTests.isWindowMemberExpr(path.node)) {
+      if (MemExTests.isWindowDotLocation(path.node)) {
+        if (bTypes.isMemberExpression(path.node.object)) {
+          path.replaceWith(windowLocReplace(path.node.property))
+        } else {
+          path.replaceWith(justSubWindowLoc)
+        }
+        visited.add(path.node.loc)
+      } else if (MemExTests.isWindowPostMessage(path.node)) {
+        path.replaceWith(postMessageReplacement)
+        visited.add(path.node.loc)
+      }
+    } else if (MemExTests.isWindowAMember(path.node) && MemExTests.isWindowDotLocation(path.node)) {
+      let sub = MemExprExtractors.extractWindowMemberLocation(path.node)
+      let {test, replace, original} = windowIsMemLocReplacer(sub)
+      insertTestCall('anObjectTest', path, test, bTypes.identifier('window'), replace, original)
+      visited.add(path.node.loc)
+    } else {
+      if (MemExTests.isWindowPostMessage(path.node) && !MemExTests.isPortTwo(path.node.object)) {
+        if (!bTypes.isCallExpression(path.parentPath)) {
           return
         }
-        if (isWindowMemberExpr(path.node)) {
-          if (isWindowDotLocation(path.node)) {
-            if (bTypes.isMemberExpression(path.node.object)) {
-              path.replaceWith(windowLocReplace(path.node.property))
-            } else {
-              path.replaceWith(justSubWindowLoc())
-            }
-            visited.add(path.node.loc)
-          } else if (isWindowPostMessage(path.node)) {
-            path.replaceWith(postMessageReplacement)
-            visited.add(path.node.loc)
-          }
-        } else if (isWindowAMember(path.node) && isWindowDotLocation(path.node)) {
-          let sub = extractWindowMemberLocation(path.node)
-          let {test, replace, original} = windowIsMemLocReplacer(sub)
-          insertTestCall('anObjectTest', path, test, bTypes.identifier('window'), replace, original)
+        visited.add(path.node.loc)
+        insertTestCall('anObjectTest', path, path.node, postMesageNode, postMessageReplacement, path.node)
+      } else {
+        if (bTypes.isIdentifier(path.node.property, {name: 'location'})) {
           visited.add(path.node.loc)
-        } else {
-          if (isWindowPostMessage(path.node) && !isPortTwo(path.node.object)) {
-            if (!bTypes.isCallExpression(path.parentPath)) {
-              return
-            }
-            visited.add(path.node.loc)
-            insertTestCall('anObjectTest', path, path.node, postMesageNode, postMessageReplacement, path.node)
-          } else {
-            if (bTypes.isIdentifier(path.node.property, {name: 'location'})) {
-              visited.add(path.node.loc)
-              insertTestCall('anObjectTest', path, path.node, locationNode, locationNode, path.node)
-            } else if (locOnObject(path.node)) {
-              visited.add(path.node.loc)
-              let sub = simpleExtractLocOnObject(path.node)
-              let {test, replace, original} = locIsOnSomeObjectReplacer(sub)
-              insertTestCall('anObjectTest', path, test, locationNode, replace, original)
-            }
-          }
+          insertTestCall('anObjectTest', path, path.node, locationNode, locationNode, path.node)
+        } else if (locOnObject(path.node)) {
+          visited.add(path.node.loc)
+          let sub = MemExprExtractors.simpleExtractLocOnObject(path.node)
+          let {test, replace, original} = locIsOnSomeObjectReplacer(sub)
+          insertTestCall('anObjectTest', path, test, locationNode, replace, original)
         }
       }
     }
-  )
+  }
+}
+
+async function doIt () {
+  const indexJs = await readJsFile(mendyIndex)
+  const ast = parse(indexJs, {
+    plugins: [
+      'jsx',
+    ]
+  })
+  console.time('travers')
+  traverse.default(ast, {
+    Program (path) {
+      testTempl.lastId = path.scope.generateUidIdentifier('objectTest')
+      path.unshiftContainer('body', testTempl.theTest({
+        ID: testTempl.lastId,
+        T: path.scope.generateUidIdentifier('T'),
+        G: path.scope.generateUidIdentifier('G'),
+        GG: path.scope.generateUidIdentifier('GG'),
+        RE: path.scope.generateUidIdentifier('RE'),
+      }))
+    },
+    MemberExpression(path) {
+      if (visited.has(path.node.loc)) {
+        return
+      }
+      let {node} = path
+      if (MemExTests.isWindowMemberExpr(node)) {
+        // if (MemExTests.isWindowDotLocation(node)) {
+        //   if (node.object.object) {
+        //     // window.location.search
+        //     path.replaceWith(windowLocReplace(path.node.property))
+        //   } else {
+        //     path.replaceWith(justSubWindowLoc)
+        //   }
+        //   visited.add(path.node.loc)
+        // } else if (MemExTests.isWindowPostMessage(node)) {
+        //   path.replaceWith(postMessageReplacement)
+        //   visited.add(path.node.loc)
+        // }
+      } else if (MemExTests.isWindowDotLocation(node)) {
+        console.log(path.node)
+        console.log(generate.default(node, {}, '').code)
+      }
+    }
+  })
   console.timeEnd('travers')
-  await fs.writeFileAsync('mindex.js', generate.default(ast, {}, '').code, 'utf8')
+  // await fs.writeFileAsync('mindex.js', generate.default(ast, {}, '').code, 'utf8')
 }
 
 runPromise(doIt)
