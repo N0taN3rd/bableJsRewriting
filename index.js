@@ -146,7 +146,73 @@ function notNull (it) {
   return !(it === null || it === undefined)
 }
 
-const cloneTemplate = template('node')
+function isLocationOnSomeObject (node) {
+  let t = bTypes.isIdentifier(node.property, {name: 'location'})
+  if (t) {
+    return t
+  }
+  let it = node.object
+  while (!(it === null || it === undefined)) {
+    if (!it.property) {
+      t = bTypes.isIdentifier(node, {name: 'location'})
+    }
+    if (t) {
+      return t
+    }
+    if (it.property) {
+      t = bTypes.isIdentifier(node.property, {name: 'location'})
+    }
+    if (t) {
+      return t
+    }
+    it = it.object
+  }
+  return false
+}
+
+function isLocOnSomeObject2 (node) {
+  let findings = {t: false, l: [], r: []}
+  let t = bTypes.isIdentifier(node.property, {name: 'location'})
+  if (t) {
+    findings.t = true
+  }
+  let it = node.object
+  while (!(it === null || it === undefined)) {
+    if (!it.property) {
+      if (bTypes.isIdentifier(it, {name: 'location'})) {
+        findings.t = true
+      } else {
+        if (findings.t) {
+          findings.r.unshift(it.name)
+        } else {
+          findings.l.unshift(it.name)
+        }
+      }
+    }
+    if (it.property) {
+      if (bTypes.isIdentifier(it.property, {name: 'location'})) {
+        findings.t = true
+      } else {
+        if (findings.t) {
+          findings.r.unshift(it.property.name)
+        } else {
+          findings.l.unshift(it.property.name)
+        }
+      }
+    }
+    it = it.object
+  }
+  return findings
+}
+
+function it () {
+  this.a = 1
+  function it2 () {
+    this.a = 2
+  }
+
+  it2.bind(it)()
+}
 
 function subBind (path, ORG, BIND, SUB) {
   let bJoined = BIND.join(',')
@@ -157,7 +223,7 @@ function subBind (path, ORG, BIND, SUB) {
       return ORG;
     }
   }`)
-  let callBindTemplate = template(`ID.bind(null,${bJoined})()`)
+  let callBindTemplate = template(`(ID.bind(null,${bJoined}))()`)
   callBindTemplate.shouldSkip = true
   let ID = programPath.scope.generateUidIdentifier('bindy')
   BIND = BIND.reduce((acum, it) => {
@@ -170,6 +236,10 @@ function subBind (path, ORG, BIND, SUB) {
   callFun.shouldSkip = true
   path.replaceWith(callFun)
   path.skip()
+}
+
+function leftAssignIsLoc (path, left, right) {
+  let testTemplate = template(`function ID (L,)`)
 }
 
 const visited = new Set()
@@ -247,12 +317,15 @@ const originalRW = {
 }
 
 const idGetter = {
-  Identifier(path) {
+  Identifier (path) {
     if (path.node.name !== 'postMessage') {
       this.captureIds.add(path.node.name)
     }
   }
 }
+
+const locationProps = new Set(['href', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash',
+  'origin', 'assign', 'reload', 'reload', 'replace'])
 
 async function doIt () {
   const indexJs = await readJsFile(mendyIndex)
@@ -290,28 +363,50 @@ async function doIt () {
         //   visited.add(path.node.loc)
         // }
       } else if (MemExTests.maybeWindowPostMessageCall(path, node)) {
-        // path.scope.crawl()
-        visited.add(path.node.loc)
-        let funParent = path.getFunctionParent().node
-        if (funParent.id && funParent.id.name && funParent.id.name.indexOf('bindy') >= 0) {
-          return
-        }
-        if (bTypes.isCallExpression(path.parentPath.node)) {
-          let captureIds = new Set()
-          path.parentPath.traverse(idGetter, {captureIds})
-          visited.add(path.parentPath.node.loc)
-          let or = _.cloneDeep(path.parentPath.node)
-          path.node.property.name = '__WB_pmw(window).postMessage'
-          subBind(path.parentPath, or, Array.from(captureIds), path.parentPath.node)
-        } else {
-          let captureIds = new Set()
-          path.traverse(idGetter, {captureIds})
-          visited.add(path.node.loc)
-          let or = _.cloneDeep(path.node)
-          path.node.property.name = '__WB_pmw(window).postMessage'
-          subBind(path, or, Array.from(captureIds), path.node)
-        }
+        // // path.scope.crawl()
+        // visited.add(path.node.loc)
+        // let funParent = path.getFunctionParent().node
+        // if (funParent.id && funParent.id.name && funParent.id.name.indexOf('bindy') >= 0) {
+        //   return
+        // }
+        // if (bTypes.isCallExpression(path.parentPath.node)) {
+        //   let captureIds = new Set()
+        //   // console.log(path.parentPath)
+        //   // console.log(path.parentPath.node.callee)
+        //   path.parentPath.traverse(idGetter, {captureIds})
+        //   visited.add(path.parentPath.node.loc)
+        //   let or = _.cloneDeep(path.parentPath.node)
+        //   path.node.property.name = '__WB_pmw(window).postMessage'
+        //   subBind(path.parentPath, or, Array.from(captureIds), path.parentPath.node)
+        // } else {
+        //   let captureIds = new Set()
+        //   path.traverse(idGetter, {captureIds})
+        //   visited.add(path.node.loc)
+        //   let or = _.cloneDeep(path.node)
+        //   path.node.property.name = '__WB_pmw(window).postMessage'
+        //   subBind(path, or, Array.from(captureIds), path.node)
+        // }
         //
+      } else {//if (isLocationOnSomeObject(node)) {
+        let findings = isLocOnSomeObject2(node)
+        if (findings.t) {
+          console.log(findings.l, findings.r)
+          let type = path.parentPath.type
+          if (type === 'AssignmentExpression') {
+            visited.add(path.node.loc)
+            let left = path.parentPath.node.left
+            if (left.property.name === 'location') {
+              let lo = generate.default(left, {}, '').code
+              console.log(path.parentPath.___VISITED)
+              /*
+               (function(){if(Object.is(${lo},window.location){window.WB_wombat_location=${generate.default(path.parentPath.node.right, {}, '').code}}else{return ${generate.default(path.parentPath.node, {}, '').code}})()`
+               */
+              path.parentPath.replaceWithSourceString(`(function(){if(Object.is(${lo}, window.location)){return window.WB_wombat_location=${generate.default(path.parentPath.node.right, {}, '').code}} else { return ${generate.default(path.parentPath.node, {}, '').code}}})()`)
+              Object.defineProperty(path.parentPath.node, '___VISITED', {value: true})
+            }
+          }
+        }
+
       }
     }
   })
