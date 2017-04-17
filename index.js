@@ -7,6 +7,8 @@ const bTypes = require('babel-types')
 const generate = require('babel-generator')
 const template = require('babel-template')
 const numToWord = require('number-to-words')
+const util = require('util')
+const _ = require('lodash')
 
 const runPromise = require('./lib/runPromise')
 const MemExTests = require('./lib/memExTests')
@@ -130,6 +132,7 @@ function makeWindowLocOnSomeObjReplaceWTest (_with) {
 
 //window. 12
 
+let programPath
 const {justSubWindowLoc, windowLocReplace} = makeWindowLocReplacer('window.WB_wombat_location')
 const postMessageReplacement = template('window.__WB_pmw(window).postMessage')()
 const postMesageNode = template('window.postMessage')()
@@ -141,6 +144,32 @@ const locOnObject = ({object}) => object && object.property ? bTypes.isIdentifie
 
 function notNull (it) {
   return !(it === null || it === undefined)
+}
+
+const cloneTemplate = template('node')
+
+function subBind (path, ORG, BIND, SUB) {
+  let bJoined = BIND.join(',')
+  let bindTemplate = template(`function ID (${bJoined}) {
+    try {
+      return SUB;
+    } catch(err) {
+      return ORG;
+    }
+  }`)
+  let callBindTemplate = template(`ID.bind(null,${bJoined})()`)
+  callBindTemplate.shouldSkip = true
+  let ID = programPath.scope.generateUidIdentifier('bindy')
+  BIND = BIND.reduce((acum, it) => {
+    acum[it] = bTypes.identifier(it)
+    return acum
+  }, {})
+  let theFun = bindTemplate(Object.assign({ID, ORG, SUB}, BIND))
+  programPath.unshiftContainer('body', theFun)
+  let callFun = callBindTemplate(Object.assign({ID}, BIND))
+  callFun.shouldSkip = true
+  path.replaceWith(callFun)
+  path.skip()
 }
 
 const visited = new Set()
@@ -162,6 +191,7 @@ function insertTestCall (name, path, T, G, GG, RE) {
   parentBlock.unshiftContainer('body', newNode)
   path.replaceWith(TID)
 }
+
 const originalRW = {
   Program (path) {
     testTempl.lastId = path.scope.generateUidIdentifier('objectTest')
@@ -216,16 +246,21 @@ const originalRW = {
   }
 }
 
+const idGetter = {
+  Identifier(path) {
+    if (path.node.name !== 'postMessage') {
+      this.captureIds.add(path.node.name)
+    }
+  }
+}
+
 async function doIt () {
   const indexJs = await readJsFile(mendyIndex)
-  const ast = parse(indexJs, {
-    plugins: [
-      'jsx',
-    ]
-  })
+  const ast = parse(indexJs, {plugins: ['jsx']})
   console.time('travers')
   traverse.default(ast, {
     Program (path) {
+      programPath = path
       testTempl.lastId = path.scope.generateUidIdentifier('objectTest')
       path.unshiftContainer('body', testTempl.theTest({
         ID: testTempl.lastId,
@@ -234,6 +269,7 @@ async function doIt () {
         GG: path.scope.generateUidIdentifier('GG'),
         RE: path.scope.generateUidIdentifier('RE'),
       }))
+      path.scope.crawl()
     },
     MemberExpression(path) {
       if (visited.has(path.node.loc)) {
@@ -253,14 +289,34 @@ async function doIt () {
         //   path.replaceWith(postMessageReplacement)
         //   visited.add(path.node.loc)
         // }
-      } else if (MemExTests.isWindowDotLocation(node)) {
-        console.log(path.node)
-        console.log(generate.default(node, {}, '').code)
+      } else if (MemExTests.maybeWindowPostMessageCall(path, node)) {
+        // path.scope.crawl()
+        visited.add(path.node.loc)
+        let funParent = path.getFunctionParent().node
+        if (funParent.id && funParent.id.name && funParent.id.name.indexOf('bindy') >= 0) {
+          return
+        }
+        if (bTypes.isCallExpression(path.parentPath.node)) {
+          let captureIds = new Set()
+          path.parentPath.traverse(idGetter, {captureIds})
+          visited.add(path.parentPath.node.loc)
+          let or = _.cloneDeep(path.parentPath.node)
+          path.node.property.name = '__WB_pmw(window).postMessage'
+          subBind(path.parentPath, or, Array.from(captureIds), path.parentPath.node)
+        } else {
+          let captureIds = new Set()
+          path.traverse(idGetter, {captureIds})
+          visited.add(path.node.loc)
+          let or = _.cloneDeep(path.node)
+          path.node.property.name = '__WB_pmw(window).postMessage'
+          subBind(path, or, Array.from(captureIds), path.node)
+        }
+        //
       }
     }
   })
   console.timeEnd('travers')
-  // await fs.writeFileAsync('mindex.js', generate.default(ast, {}, '').code, 'utf8')
+  await fs.writeFileAsync('mindex.js', generate.default(ast, {}, '').code, 'utf8')
 }
 
 runPromise(doIt)
